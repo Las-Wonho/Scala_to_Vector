@@ -1,56 +1,56 @@
-# play-scala-starter-example
+# Play File Upload using a custom BodyParser
 
-[<img src="https://img.shields.io/travis/playframework/play-scala-starter-example.svg"/>](https://travis-ci.org/playframework/play-scala-starter-example)
+This is a sample project that shows how to upload a file through Akka Streams using a custom BodyParser using Akka Streams using the Scala API.
 
-This is a starter application that shows how Play works.  Please see the documentation at <https://www.playframework.com/documentation/latest/Home> for more details.
+Play's Scala API for `parse.multipartFormData` uses a `BodyParser[MultipartFormData[TemporaryFile]]`.  The `TemporaryFile` wrapper class creates a file under a "temporary" name and then deletes it only when the system is under GC pressure.
 
-## Running
+## Customizing the Body Parser
 
-Run this using [sbt](http://www.scala-sbt.org/).  If you downloaded this project from <http://www.playframework.com/download> then you'll find a prepackaged version of sbt in the project directory:
+There are cases where it's useful to have more control over where and Play uploads multi part form data.  In this case, we'd like to get access to the accumulated byte stream for each file part and generate a file directly, without going through `TemporaryFile`.
 
-```bash
-sbt run```
+In short, we want to replace:
 
-And then go to <http://localhost:9000> to see the running web application.
+```scala
+Action(parse.multipartFormData)
+```
 
-There are several demonstration files available in this template.
+with
 
-## Controllers
+```scala
+Action(parse.multipartFormData(handleFilePartAsFile))
+```
 
-- HomeController.scala:
+And we want to change as little code as possible.  The underlying mechanics are simple -- rather than use the default parser, a method `handleFilePartAsFile` is called in the action and returns a file:
 
-  Shows how to handle simple HTTP requests.
+``` scala
+def upload = Action(parse.multipartFormData(handleFilePartAsFile)) { implicit request =>
+  val fileOption = request.body.file("name").map {
+    case FilePart(key, filename, contentType, file) =>
+      logger.info(s"key = ${key}, filename = ${filename}, contentType = ${contentType}, file = $file")
+      val data = operateOnTempFile(file)
+      data
+  }
 
-- AsyncController.scala:
+  Ok(s"file size = ${fileOption}")
+}
+```
 
-  Shows how to do asynchronous programming when handling a request.
+The implementation of `handleFilePartAsFile` uses a type alias `FilePartHandler` that is returned, and a custom accumulator will pull a file from anywhere on the filesystem (here we are using `Files.createTempFile`)
 
-- CountController.scala:
+```scala
+type FilePartHandler[A] = FileInfo => Accumulator[ByteString, FilePart[A]]
 
-  Shows how to inject a component into a controller and use the component when
-  handling requests.
-
-## Components
-
-- Module.scala:
-
-  Shows how to use Guice to bind all the components needed by your application.
-
-- Counter.scala:
-
-  An example of a component that contains state, in this case a simple counter.
-
-- ApplicationTimer.scala:
-
-  An example of a component that starts when the application starts and stops
-  when the application stops.
-
-## Filters
-
-- Filters.scala:
-
-  Creates the list of HTTP filters used by your application.
-
-- ExampleFilter.scala
-
-  A simple filter that adds a header to every response.
+private def handleFilePartAsFile: FilePartHandler[File] = {
+  case FileInfo(partName, filename, contentType) =>
+    val attr = PosixFilePermissions.asFileAttribute(util.EnumSet.of(OWNER_READ, OWNER_WRITE))
+    val path: Path = Files.createTempFile("multipartBody", "tempFile", attr)
+    val file = path.toFile
+    val fileSink: Sink[ByteString, Future[IOResult]] = FileIO.toFile(file)
+    val accumulator: Accumulator[ByteString, IOResult] = Accumulator(fileSink)
+    accumulator.map {
+      case IOResult(count, status) =>
+        logger.info(s"count = $count, status = $status")
+        FilePart(partName, filename, contentType, file)
+    }(play.api.libs.concurrent.Execution.defaultContext)
+}
+```
